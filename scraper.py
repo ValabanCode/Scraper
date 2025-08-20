@@ -33,7 +33,28 @@ def log_message(message):
     print(log_entry)
     with open(LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(log_entry + "\n")
+# <--- AÑADE ESTA NUEVA FUNCIÓN ---
+def guardar_registro_csv(registro, filename):
+    """
+    Guarda una única fila en el CSV, manejando el header de forma segura.
+    Abre y cierra el archivo en cada llamada para garantizar la escritura.
+    """
+    try:
+        file_exists = os.path.exists(filename)
+        needs_header = not file_exists or os.path.getsize(filename) == 0
 
+        with open(filename, 'a', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            if needs_header:
+                header = [
+                    'TIPO', 'MARCA', 'MODELO', 'CC', 'AÑO', 'URL GENERAL',
+                    'Producto', 'Marca Producto', 'Referencia',
+                    'Referencia MEIWA', 'Referencia HIFLO', 'URL DEL PRODUCTO'
+                ]
+                writer.writerow(header)
+            writer.writerow(registro)
+    except Exception as e:
+        log_message(f"‼️ ERROR CRÍTICO AL GUARDAR EN CSV: {e}")
 # --- NUEVAS FUNCIONES PARA MANEJAR PRODUCTOS POR AÑO ---
 def crear_clave_unica(url_producto, datos_moto):
     """Crea una clave única que incluye el contexto del año/modelo"""
@@ -74,9 +95,11 @@ def leer_registros_procesados(filename):
 
 # --- FUNCIONES DE AYUDA ---
 def configurar_driver():
-    """Configura e inicia el navegador Chrome con Selenium."""
+    """Configura e inicia el navegador Chrome con Selenium (versión para servidor)."""
     options = webdriver.ChromeOptions()
-    # options.add_argument('--headless')  # Descomenta para ejecutar sin interfaz gráfica
+    
+    options.add_argument('--headless')
+    options.add_argument(f'--user-data-dir=/tmp/chrome-session-{os.getpid()}')
     options.add_argument('--log-level=3')
     options.add_argument('--disable-gpu')
     options.add_argument('--no-sandbox')
@@ -88,7 +111,6 @@ def configurar_driver():
     
     try:
         driver = webdriver.Chrome(options=options)
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         driver.set_page_load_timeout(60)
         driver.implicitly_wait(10)
         return driver
@@ -633,20 +655,18 @@ def parsear_modelo_y_anio(texto_modelo, cc_text):
     
     return modelo_limpio, cc_parseado, anio
 
-# --- FUNCIÓN PRINCIPAL DE SCRAPING CON RECUPERACIÓN CORREGIDA ---
-def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
+# <--- REEMPLAZA TU FUNCIÓN ORIGINAL CON ESTA ---
+def procesar_tarea_seguro(driver, tarea, processed_keys):
     """Procesa una tarea específica con manejo robusto de errores y productos por año."""
     log_message(f"\n--- Procesando: {tarea['tipo_text']} | {tarea['marca_text']} | {tarea['cc_text']} | {tarea['modelo_text']} ---")
     
     productos_procesados = 0
     
     try:
-        # Reiniciar selectores antes de cada tarea
         if not reiniciar_selectores(driver):
             log_message(f"❌ ERROR: No se pudo reiniciar selectores para la tarea")
             return 0
         
-        # Seleccionar opciones con recuperación
         if not seleccionar_opcion_segura_con_recuperacion(driver, (By.ID, 'itipo'), tarea['tipo_value'], (By.ID, 'imarca'), "tipo"):
             log_message(f"❌ ERROR: No se pudo seleccionar tipo {tarea['tipo_text']}")
             return 0
@@ -663,15 +683,13 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
             log_message(f"❌ ERROR: No se pudo seleccionar modelo {tarea['modelo_text']}")
             return 0
         
-        time.sleep(3)  # Esperar a que cargue la página de resultados
+        time.sleep(3)
         
-        # Verificar si hay tabla de años o productos directos
         tabla_anios = driver.find_elements(By.CSS_SELECTOR, "table.resultats tbody tr")
         
         if tabla_anios:
             log_message(f"    Encontrada tabla con {len(tabla_anios)} filas de años")
             
-            # Identificar columna de año
             year_column_index = -1
             try:
                 headers = driver.find_elements(By.CSS_SELECTOR, "table.resultats thead th")
@@ -683,7 +701,6 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
             except:
                 year_column_index = -1
             
-            # Recolectar información de todas las filas primero
             filas_info = []
             for idx_fila, fila in enumerate(tabla_anios):
                 try:
@@ -691,19 +708,16 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
                     if len(celdas) < 2:
                         continue
                     
-                    # Obtener URL y datos de la fila
                     link_element = celdas[0].find_element(By.TAG_NAME, 'a')
                     url_general = link_element.get_attribute('href')
                     modelo_completo = celdas[0].text.strip()
                     
-                    # Obtener año
                     anio = "N/A"
                     if year_column_index >= 0 and year_column_index < len(celdas):
                         anio_texto = celdas[year_column_index].text.strip()
                         if anio_texto.isdigit() and len(anio_texto) >= 4:
                             anio = anio_texto
                     
-                    # Si no encontramos año en la columna, intentar extraerlo del modelo
                     if anio == "N/A":
                         modelo_parseado, cc_parseado, anio_parseado = parsear_modelo_y_anio(modelo_completo, tarea['cc_text'])
                         anio = anio_parseado
@@ -728,12 +742,10 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
             
             log_message(f"    📊 Total de filas válidas encontradas: {len(filas_info)}")
             
-            # Ahora procesar cada fila/año individualmente
             for fila_info in filas_info:
                 try:
                     log_message(f"\n    🔄 Procesando Año {fila_info['anio']} (Fila {fila_info['fila_numero']})...")
                     
-                    # Preparar datos de la moto para este año específico
                     datos_moto = {
                         'tipo_text': tarea['tipo_text'],
                         'marca_text': tarea['marca_text'],
@@ -743,20 +755,16 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
                         'url_general': fila_info['url_general']
                     }
                     
-                    # Navegar a la página de productos específica de este año
                     log_message(f"      🌐 Navegando a: {fila_info['url_general']}")
                     driver.get(fila_info['url_general'])
                     time.sleep(DELAY_BETWEEN_REQUESTS)
                     
-                    # Extraer productos de este año específico
                     productos = extraer_productos_de_pagina(driver)
                     
                     log_message(f"      📦 Año {fila_info['anio']}: {len(productos)} productos encontrados")
                     
-                    # Procesar cada producto de este año
                     productos_procesados_anio = 0
                     for producto in productos:
-                        # CAMBIO PRINCIPAL: Usar clave única en lugar de solo URL
                         clave_unica = crear_clave_unica(producto['url'], datos_moto)
                         
                         if clave_unica in processed_keys:
@@ -765,8 +773,8 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
                         
                         detalle = extraer_detalle_producto(driver, producto['url'], producto['marca_producto'], datos_moto)
                         if detalle:
-                            csv_writer.writerow(detalle)
-                            processed_keys.add(clave_unica)  # Agregar la clave única
+                            guardar_registro_csv(detalle, OUTPUT_FILE)
+                            processed_keys.add(clave_unica)
                             productos_procesados += 1
                             productos_procesados_anio += 1
                             log_message(f"        ✅ Procesado: {detalle[6]} ({detalle[7]}) - Año: {fila_info['anio']}")
@@ -775,7 +783,6 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
                     
                     log_message(f"      📈 Año {fila_info['anio']} completado: {productos_procesados_anio} productos procesados")
                     
-                    # Pequeña pausa entre años para evitar sobrecarga
                     if len(filas_info) > 1:
                         time.sleep(1)
                     
@@ -784,7 +791,6 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
                     continue
         
         else:
-            # No hay tabla de años, productos directos
             log_message("    Sin tabla de años, procesando productos directos")
             
             url_general = driver.current_url
@@ -803,7 +809,6 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
             log_message(f"    {len(productos)} productos encontrados")
             
             for producto in productos:
-                # CAMBIO PRINCIPAL: Usar clave única en lugar de solo URL
                 clave_unica = crear_clave_unica(producto['url'], datos_moto)
                 
                 if clave_unica in processed_keys:
@@ -812,8 +817,8 @@ def procesar_tarea_seguro(driver, tarea, processed_keys, csv_writer):
                 
                 detalle = extraer_detalle_producto(driver, producto['url'], producto['marca_producto'], datos_moto)
                 if detalle:
-                    csv_writer.writerow(detalle)
-                    processed_keys.add(clave_unica)  # Agregar la clave única
+                    guardar_registro_csv(detalle, OUTPUT_FILE)
+                    processed_keys.add(clave_unica)
                     productos_procesados += 1
                     log_message(f"      ✅ Procesado: {detalle[6]} - {detalle[7]} - Año: {datos_moto['anio']}")
         
@@ -903,26 +908,21 @@ def verificar_resultado_final(csv_file):
         return False
 
 # --- SCRIPT PRINCIPAL CON MANEJO MEJORADO DE ERRORES ---
+# <--- REEMPLAZA TU BLOQUE PRINCIPAL CON ESTE ---
 if __name__ == "__main__":
     log_message("=== INICIANDO SCRAPER EUROMOTO85 CON PRODUCTOS POR AÑO ===")
     
-    # Manejo de reset y backup
     if FORCE_FRESH_START:
         log_message("🔄 MODO RESET ACTIVADO - Iniciando proceso limpio")
         if os.path.exists(OUTPUT_FILE):
-            archivos_backup = hacer_backup_archivos()
-            if archivos_backup:
-                log_message(f"✅ Backups creados: {', '.join(archivos_backup)}")
-            # Eliminar archivo actual
+            hacer_backup_archivos()
             try:
                 os.remove(OUTPUT_FILE)
                 log_message(f"🗑️ Archivo anterior eliminado: {OUTPUT_FILE}")
             except Exception as e:
                 log_message(f"⚠️ Error eliminando archivo anterior: {e}")
     
-    # Fase 1: Cargar o crear lista de tareas
     lista_de_tareas = []
-    
     if SKIP_PHASE_1 and os.path.exists(TASKS_FILE):
         log_message(f"⏭️ SALTANDO FASE 1 - Cargando tareas existentes desde '{TASKS_FILE}'")
         try:
@@ -943,28 +943,22 @@ if __name__ == "__main__":
                 log_message(f"✅ Se cargaron {len(lista_de_tareas)} tareas")
             except Exception as e:
                 log_message(f"❌ Error cargando tareas: {e}")
-        
         if not lista_de_tareas:
             log_message("🔄 Creando nueva lista de tareas...")
             driver_fase1 = configurar_driver()
             if not driver_fase1:
                 log_message("❌ ERROR: No se pudo iniciar driver para Fase 1")
                 exit()
-            
             lista_de_tareas = recopilar_todas_las_tareas_seguro(driver_fase1)
             driver_fase1.quit()
-            
             if not lista_de_tareas:
                 log_message("❌ ERROR: No se pudieron recopilar tareas")
                 exit()
     else:
         log_message(f"❌ ERROR: SKIP_PHASE_1=True pero no existe '{TASKS_FILE}'")
-        log_message("Opciones:")
-        log_message("1. Cambiar SKIP_PHASE_1 = False para crear tareas")
-        log_message("2. Asegurarse de que existe el archivo de tareas")
+        log_message("Opciones:\n1. Cambiar SKIP_PHASE_1 = False para crear tareas\n2. Asegurarse de que existe el archivo de tareas")
         exit()
     
-    # Filtrar por marca de inicio si se especifica
     if START_AFTER_BRAND:
         try:
             indices = [i for i, task in enumerate(lista_de_tareas) if task['marca_text'] == START_AFTER_BRAND]
@@ -975,79 +969,47 @@ if __name__ == "__main__":
         except Exception as e:
             log_message(f"⚠️ Error aplicando filtro de marca de inicio: {e}")
     
-    # Fase 2: Procesar todas las tareas con nueva lógica
     processed_keys = leer_registros_procesados(OUTPUT_FILE) if not FORCE_FRESH_START else set()
     
-    # Preparar archivo CSV
-    file_exists = os.path.exists(OUTPUT_FILE) and os.path.getsize(OUTPUT_FILE) > 0
-    file_mode = 'a' if (file_exists and not FORCE_FRESH_START) else 'w'
+    log_message(f"=== FASE 2: Procesando {len(lista_de_tareas)} tareas con productos por año ===")
+    total_productos_procesados, tareas_exitosas, tareas_con_error, tareas_saltadas = 0, 0, 0, 0
     
-    log_message(f"📝 Modo de archivo CSV: {'APPEND (agregar)' if file_mode == 'a' else 'WRITE (nuevo/sobrescribir)'}")
-    
-    with open(OUTPUT_FILE, file_mode, newline='', encoding='utf-8') as csvfile:
-        writer = csv.writer(csvfile)
-        
-        # Escribir header si es archivo nuevo o modo sobrescribir
-        if file_mode == 'w':
-            header = [
-                'TIPO', 'MARCA', 'MODELO', 'CC', 'AÑO', 'URL GENERAL',
-                'Producto', 'Marca Producto', 'Referencia',
-                'Referencia MEIWA', 'Referencia HIFLO', 'URL DEL PRODUCTO'
-            ]
-            writer.writerow(header)
-            log_message("📋 Headers escritos en CSV")
-        
-        log_message(f"=== FASE 2: Procesando {len(lista_de_tareas)} tareas con productos por año ===")
-        
-        total_productos_procesados = 0
-        tareas_exitosas = 0
-        tareas_con_error = 0
-        tareas_saltadas = 0
-        
-        # Procesar cada tarea
-        for i, tarea in enumerate(lista_de_tareas):
-            log_message(f"\n>>> TAREA {i+1}/{len(lista_de_tareas)} <<<")
-            
-            # Configurar nuevo driver para cada tarea (más estable)
+    for i, tarea in enumerate(lista_de_tareas):
+        log_message(f"\n>>> TAREA {i+1}/{len(lista_de_tareas)} <<<")
+        driver = None
+        try:
             driver = configurar_driver()
             if not driver:
-                log_message("❌ ERROR: No se pudo iniciar driver")
+                log_message("❌ ERROR: No se pudo iniciar el driver. Saltando tarea.")
                 tareas_con_error += 1
                 continue
             
-            try:
-                productos_en_tarea = procesar_tarea_seguro(driver, tarea, processed_keys, writer)
-                
-                if productos_en_tarea > 0:
-                    total_productos_procesados += productos_en_tarea
-                    tareas_exitosas += 1
-                    # Guardar progreso inmediatamente
-                    csvfile.flush()
-                    log_message(f"✅ Tarea {i+1} exitosa: {productos_en_tarea} productos procesados")
-                elif productos_en_tarea == 0:
-                    log_message("⚠️ Tarea completada pero sin productos nuevos")
-                    tareas_saltadas += 1
-                else:
-                    log_message("❌ Tarea falló")
-                    tareas_con_error += 1
-                
-            except Exception as e:
-                log_message(f"❌ ERROR CRÍTICO en tarea {i+1}: {e}")
-                tareas_con_error += 1
+            productos_en_tarea = procesar_tarea_seguro(driver, tarea, processed_keys)
             
-            finally:
+            if productos_en_tarea > 0:
+                total_productos_procesados += productos_en_tarea
+                tareas_exitosas += 1
+                log_message(f"✅ Tarea {i+1} exitosa: {productos_en_tarea} productos procesados")
+            elif productos_en_tarea == 0:
+                log_message("⚠️ Tarea completada pero sin productos nuevos")
+                tareas_saltadas += 1
+            else:
+                log_message("❌ Tarea falló")
+                tareas_con_error += 1
+        except Exception as e:
+            log_message(f"❌ ERROR CRÍTICO en tarea {i+1}: {e}")
+            tareas_con_error += 1
+        finally:
+            if driver:
                 try:
                     driver.quit()
                     log_message(f"🔧 Driver cerrado para tarea {i+1}")
                 except:
                     log_message(f"⚠️ Error cerrando driver para tarea {i+1}")
-                
-                # Pequeña pausa entre tareas para evitar sobrecarga
-                if i < len(lista_de_tareas) - 1:
-                    log_message("⏳ Pausa entre tareas...")
-                    time.sleep(3)
+            if i < len(lista_de_tareas) - 1:
+                log_message("⏳ Pausa entre tareas...")
+                time.sleep(3)
     
-    # Estadísticas finales mejoradas
     log_message(f"\n" + "="*60)
     log_message(f"=== PROCESO COMPLETADO CON PRODUCTOS POR AÑO ===")
     log_message(f"="*60)
@@ -1057,20 +1019,17 @@ if __name__ == "__main__":
     log_message(f"   • Tareas saltadas (sin productos): {tareas_saltadas}")
     log_message(f"   • Tareas con error: {tareas_con_error}")
     log_message(f"   • Total de productos procesados: {total_productos_procesados}")
-    log_message(f"   • Tasa de éxito: {(tareas_exitosas/len(lista_de_tareas)*100):.1f}%")
+    log_message(f"   • Tasa de éxito: {(tareas_exitosas/len(lista_de_tareas)*100 if len(lista_de_tareas) > 0 else 0):.1f}%")
     log_message(f"")
     log_message(f"📁 ARCHIVOS GENERADOS:")
     log_message(f"   • Datos CSV: {OUTPUT_FILE}")
     log_message(f"   • Lista de tareas: {TASKS_FILE}")
     log_message(f"   • Archivo de log: {LOG_FILE}")
     
-    # Verificación final
-    if total_productos_procesados > 0:
+    if total_productos_procesados > 0 or (os.path.exists(OUTPUT_FILE) and os.path.getsize(OUTPUT_FILE) > 0):
         log_message(f"\n🔍 VERIFICANDO RESULTADO FINAL...")
         if verificar_resultado_final(OUTPUT_FILE):
             log_message(f"\n🎉 ¡SCRAPING COMPLETADO EXITOSAMENTE CON PRODUCTOS POR AÑO!")
-            log_message(f"   ✅ Se procesaron {total_productos_procesados} registros únicos por año")
-            log_message(f"   ✅ Cada producto ahora incluye información de compatibilidad por años")
         else:
             log_message(f"\n⚠️ SCRAPING COMPLETADO PERO HAY PROBLEMAS EN LA VERIFICACIÓN")
     else:
